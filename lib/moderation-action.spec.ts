@@ -1,0 +1,219 @@
+/**
+ * @jest-environment node
+ */
+import nock from 'nock';
+import { checkAndAutoDelete, checkAndAutoDeleteQuestion } from './moderation-action';
+import type { ModerateJobOutputs } from '@mux/mux-node/resources/robots-preview/jobs/moderate';
+
+const assetId = 'test-asset-123';
+const playbackId = 'test-playback-456';
+
+beforeEach(() => {
+  nock.disableNetConnect();
+  process.env.AIRTABLE_KEY = 'test-airtable-key';
+  process.env.AIRTABLE_BASE_ID = 'test-base-id';
+});
+
+afterEach(() => {
+  nock.cleanAll();
+  delete process.env.AUTO_DELETE_ENABLED;
+  delete process.env.AIRTABLE_KEY;
+  delete process.env.AIRTABLE_BASE_ID;
+});
+
+test('returns false when AUTO_DELETE_ENABLED is not set, even if moderation exceeds', async () => {
+  const moderationResult: ModerateJobOutputs = {
+    exceeds_threshold: true,
+    max_scores: { sexual: 0.95, violence: 0.92 },
+    thumbnail_scores: [],
+  };
+
+  const didDelete = await checkAndAutoDelete({
+    assetId,
+    playbackId,
+    moderationResult,
+  });
+
+  expect(didDelete).toBe(false);
+});
+
+test('deletes and records when AUTO_DELETE_ENABLED=1 and moderation exceeds', async () => {
+  process.env.AUTO_DELETE_ENABLED = '1';
+
+  const scopeMux = nock('https://api.mux.com')
+    .delete(`/video/v1/assets/${assetId}/playback-ids/${playbackId}`)
+    .reply(204);
+
+  const scopeAirtable = nock('https://api.airtable.com')
+    .post('/v0/test-base-id/Auto%20Deleted')
+    .reply(200, { records: [] });
+
+  const moderationResult: ModerateJobOutputs = {
+    exceeds_threshold: true,
+    max_scores: { sexual: 0.95, violence: 0.92 },
+    thumbnail_scores: [],
+  };
+
+  const didDelete = await checkAndAutoDelete({
+    assetId,
+    playbackId,
+    moderationResult,
+  });
+
+  expect(didDelete).toBe(true);
+  expect(scopeMux.isDone()).toBe(true);
+  expect(scopeAirtable.isDone()).toBe(true);
+});
+
+test('does not delete when moderation does not exceed threshold', async () => {
+  process.env.AUTO_DELETE_ENABLED = '1';
+
+  const moderationResult: ModerateJobOutputs = {
+    exceeds_threshold: false,
+    max_scores: { sexual: 0.40, violence: 0.25 },
+    thumbnail_scores: [],
+  };
+
+  const didDelete = await checkAndAutoDelete({
+    assetId,
+    playbackId,
+    moderationResult,
+  });
+
+  expect(didDelete).toBe(false);
+});
+
+test('still returns true if Airtable recording fails', async () => {
+  process.env.AUTO_DELETE_ENABLED = '1';
+
+  const scopeMux = nock('https://api.mux.com')
+    .delete(`/video/v1/assets/${assetId}/playback-ids/${playbackId}`)
+    .reply(204);
+
+  const scopeAirtable = nock('https://api.airtable.com')
+    .post('/v0/test-base-id/Auto%20Deleted')
+    .reply(500, { error: 'Internal error' });
+
+  const moderationResult: ModerateJobOutputs = {
+    exceeds_threshold: true,
+    max_scores: { sexual: 0.95, violence: 0.92 },
+    thumbnail_scores: [],
+  };
+
+  const didDelete = await checkAndAutoDelete({
+    assetId,
+    playbackId,
+    moderationResult,
+  });
+
+  expect(didDelete).toBe(true);
+  expect(scopeMux.isDone()).toBe(true);
+  expect(scopeAirtable.isDone()).toBe(true);
+  // Airtable error should be logged but not prevent deletion
+});
+
+// Question-based moderation tests
+
+const question = 'Is this a professionally produced full length movie or TV show, or a standalone segment from it?';
+
+test('question: deletes when answer is yes and confidence > 0.8', async () => {
+  process.env.AUTO_DELETE_ENABLED = '1';
+
+  const scopeMux = nock('https://api.mux.com')
+    .delete(`/video/v1/assets/${assetId}/playback-ids/${playbackId}`)
+    .reply(204);
+
+  const scopeAirtable = nock('https://api.airtable.com')
+    .post('/v0/test-base-id/Auto%20Deleted')
+    .reply(200, { records: [] });
+
+  const didDelete = await checkAndAutoDeleteQuestion({
+    assetId,
+    playbackId,
+    question,
+    answer: 'yes',
+    confidence: 0.85,
+  });
+
+  expect(didDelete).toBe(true);
+  expect(scopeMux.isDone()).toBe(true);
+  expect(scopeAirtable.isDone()).toBe(true);
+});
+
+test('question: does not delete when confidence is exactly 0.8', async () => {
+  process.env.AUTO_DELETE_ENABLED = '1';
+
+  const didDelete = await checkAndAutoDeleteQuestion({
+    assetId,
+    playbackId,
+    question,
+    answer: 'yes',
+    confidence: 0.8,
+  });
+
+  expect(didDelete).toBe(false);
+});
+
+test('question: does not delete when confidence <= 0.8', async () => {
+  process.env.AUTO_DELETE_ENABLED = '1';
+
+  const didDelete = await checkAndAutoDeleteQuestion({
+    assetId,
+    playbackId,
+    question,
+    answer: 'yes',
+    confidence: 0.75,
+  });
+
+  expect(didDelete).toBe(false);
+});
+
+test('question: does not delete when answer is no', async () => {
+  process.env.AUTO_DELETE_ENABLED = '1';
+
+  const didDelete = await checkAndAutoDeleteQuestion({
+    assetId,
+    playbackId,
+    question,
+    answer: 'no',
+    confidence: 0.95,
+  });
+
+  expect(didDelete).toBe(false);
+});
+
+test('question: does not delete when AUTO_DELETE_ENABLED is not set', async () => {
+  const didDelete = await checkAndAutoDeleteQuestion({
+    assetId,
+    playbackId,
+    question,
+    answer: 'yes',
+    confidence: 0.95,
+  });
+
+  expect(didDelete).toBe(false);
+});
+
+test('question: still returns true if Airtable recording fails', async () => {
+  process.env.AUTO_DELETE_ENABLED = '1';
+
+  const scopeMux = nock('https://api.mux.com')
+    .delete(`/video/v1/assets/${assetId}/playback-ids/${playbackId}`)
+    .reply(204);
+
+  const scopeAirtable = nock('https://api.airtable.com')
+    .post('/v0/test-base-id/Auto%20Deleted')
+    .reply(500, { error: 'Internal error' });
+
+  const didDelete = await checkAndAutoDeleteQuestion({
+    assetId,
+    playbackId,
+    question,
+    answer: 'yes',
+    confidence: 0.9,
+  });
+
+  expect(didDelete).toBe(true);
+  expect(scopeMux.isDone()).toBe(true);
+  expect(scopeAirtable.isDone()).toBe(true);
+});
