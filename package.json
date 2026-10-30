@@ -6,9 +6,9 @@
     "node": ">=22.0.0"
   },
   "scripts": {
-    "dev": "node api.js && next dev",
-    "build": "node api.js && npm run lint && next build",
-    "start": "node api.js && next start",
+    "dev": "node init && next dev",
+    "build": "node init && npm run lint && next build",
+    "start": "node init && next start",
     "lint": "eslint . --ext .js,.jsx,.ts,.tsx",
     "format": "npm run lint",
     "test": "jest",
